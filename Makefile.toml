@@ -1,0 +1,406 @@
+[config]
+default_to_workspace = false
+
+[env]
+LLVM_VERSION = "20.1.0"
+LUAJIT_DIR = "target/luajit/LuaJIT"
+LUA_LIB = "${CARGO_MAKE_WORKING_DIRECTORY}/${LUAJIT_DIR}/src"
+LUA_LINK = "static"
+LUA_LIB_NAME = "luajit"
+CARGO_PROFILE = "dev"
+CARGO_OUT_DIR = "debug"
+
+[env.release]
+CARGO_PROFILE = "release"
+CARGO_OUT_DIR = "release"
+
+[tasks.default]
+alias = "build"
+
+[tasks.build]
+clear = true
+description = "Build the workspace"
+dependencies = ["submodules", "luajit", "cargo-build"]
+
+[tasks.install]
+description = "Build and install binaries"
+dependencies = ["submodules", "luajit", "install-rust-bins", "install-sleighc"]
+
+[tasks.clean]
+description = "Clean all build artefacts"
+dependencies = ["clean-cargo", "clean-luajit", "clean-llvm"]
+
+[tasks.submodules]
+description = "Initialise git submodules"
+command = "git"
+args = ["submodule", "update", "--init", "--recursive"]
+
+[tasks.luajit]
+description = "Clone, patch, and build LuaJIT"
+dependencies = ["luajit-clone", "luajit-patch", "luajit-build"]
+
+[tasks.luajit-clone]
+description = "Clone LuaJIT v2.1"
+linux_alias = "luajit-clone-unix"
+mac_alias = "luajit-clone-unix"
+windows_alias = "luajit-clone-windows"
+
+[tasks.luajit-clone-unix]
+private = true
+condition_script = ['test ! -d "${LUAJIT_DIR}/.git"']
+script = [
+  'mkdir -p target/luajit',
+  'git clone https://github.com/LuaJIT/LuaJIT.git -b v2.1 "${LUAJIT_DIR}"',
+]
+
+[tasks.luajit-clone-windows]
+private = true
+condition_script = ['if exist "%LUAJIT_DIR%\\.git" (exit /b 1) else (exit /b 0)']
+script_runner = "cmd"
+script_runner_args = ["/c"]
+script_extension = "cmd"
+script = ['''
+@echo off
+if not exist target\luajit mkdir target\luajit
+git clone https://github.com/LuaJIT/LuaJIT.git -b v2.1 "%LUAJIT_DIR%"
+''']
+
+[tasks.luajit-patch]
+description = "Apply VulHunt patches to LuaJIT"
+dependencies = ["luajit-clone"]
+linux_alias = "luajit-patch-unix"
+mac_alias = "luajit-patch-unix"
+windows_alias = "luajit-patch-windows"
+
+[tasks.luajit-patch-unix]
+private = true
+condition_script = ['test ! -f "${LUAJIT_DIR}/.vulhunt-patched"']
+script = ['''
+cd "${LUAJIT_DIR}"
+git checkout -- .
+git apply "${CARGO_MAKE_WORKING_DIRECTORY}/patches/luajit-vulhunt.patch"
+touch .vulhunt-patched
+''']
+
+[tasks.luajit-patch-windows]
+private = true
+condition_script = ['if exist "%LUAJIT_DIR%\\.vulhunt-patched" (exit /b 1) else (exit /b 0)']
+script_runner = "cmd"
+script_runner_args = ["/c"]
+script_extension = "cmd"
+script = ['''
+@echo off
+cd /d "%LUAJIT_DIR%"
+git checkout -- .
+git apply "%CARGO_MAKE_WORKING_DIRECTORY%\patches\luajit-vulhunt.patch"
+echo.> .vulhunt-patched
+''']
+
+[tasks.luajit-build]
+description = "Build LuaJIT (platform-specific)"
+linux_alias = "luajit-build-linux"
+mac_alias = "luajit-build-mac"
+windows_alias = "luajit-build-windows"
+
+[tasks.luajit-build-mac]
+private = true
+condition_script = ['test ! -f "${LUAJIT_DIR}/src/libluajit.a"']
+script = [
+  'cd "${LUAJIT_DIR}" && MACOSX_DEPLOYMENT_TARGET=$(sw_vers -productVersion) make BUILDMODE=static',
+]
+
+[tasks.luajit-build-linux]
+private = true
+condition_script = ['test ! -f "${LUAJIT_DIR}/src/libluajit.a"']
+script = [
+  'cd "${LUAJIT_DIR}" && make BUILDMODE=static',
+]
+
+[tasks.luajit-build-windows]
+private = true
+env = { "LUA_LIB_NAME" = "lua51" }
+condition_script = ['if exist "%LUAJIT_DIR%\\src\\lua51.lib" (exit /b 1) else (exit /b 0)']
+script_runner = "cmd"
+script_runner_args = ["/c"]
+script_extension = "cmd"
+script = ['cd /d "%LUAJIT_DIR%\\src" && msvcbuild.bat static']
+
+[tasks.llvm-download]
+description = "Download pre-built LLVM 20 libraries"
+private = false
+linux_alias = "llvm-download-linux"
+mac_alias = "llvm-download-mac"
+windows_alias = "llvm-download-windows"
+
+[tasks.llvm-download-linux]
+private = true
+condition_script = ['test ! -f "target/llvm/lib/libclang.so"']
+script = ['''
+rm -rf target/llvm
+mkdir -p target/llvm
+case "$(uname -m)" in
+  x86_64)  ARCH="X64" ;;
+  aarch64) ARCH="ARM64" ;;
+  *)       echo "Unsupported architecture: $(uname -m)"; exit 1 ;;
+esac
+curl -L "https://github.com/llvm/llvm-project/releases/download/llvmorg-${LLVM_VERSION}/LLVM-${LLVM_VERSION}-Linux-${ARCH}.tar.xz" | xz -dc -T0 | tar -xf - -C target/llvm --strip-components=1
+''']
+
+[tasks.llvm-download-mac]
+private = true
+condition_script = ['test ! -f "target/llvm/lib/libclang.dylib"']
+script = ['''
+rm -rf target/llvm
+mkdir -p target/llvm
+curl -L "https://github.com/llvm/llvm-project/releases/download/llvmorg-${LLVM_VERSION}/LLVM-${LLVM_VERSION}-macOS-ARM64.tar.xz" | xz -dc -T0 | tar -xf - -C target/llvm --strip-components=1
+''']
+
+[tasks.llvm-download-windows]
+private = true
+condition_script = ['if exist "target\\llvm\\bin\\libclang.dll" (exit /b 1) else (exit /b 0)']
+script_runner = "cmd"
+script_runner_args = ["/c"]
+script_extension = "cmd"
+script = ['''
+@echo off
+if exist target\llvm rmdir /s /q target\llvm
+mkdir target\llvm-tmp
+curl -L -o target\llvm-tmp\llvm.tar.xz "https://github.com/llvm/llvm-project/releases/download/llvmorg-%LLVM_VERSION%/clang+llvm-%LLVM_VERSION%-x86_64-pc-windows-msvc.tar.xz"
+7z x -mmt=on target\llvm-tmp\llvm.tar.xz -otarget\llvm-tmp
+7z x -mmt=on target\llvm-tmp\llvm.tar -otarget\llvm-tmp
+move target\llvm-tmp\clang+llvm-%LLVM_VERSION%-x86_64-pc-windows-msvc target\llvm
+rmdir /s /q target\llvm-tmp
+''']
+
+[tasks.cargo-build]
+description = "Build workspace with cargo"
+linux_alias = "cargo-build-unix"
+mac_alias = "cargo-build-unix"
+windows_alias = "cargo-build-windows"
+
+[tasks.cargo-build-unix]
+private = true
+command = "cargo"
+args = ["build", "--profile", "${CARGO_PROFILE}", "${@}"]
+
+[tasks.cargo-build-windows]
+private = true
+env = { "LUA_LIB_NAME" = "lua51" }
+command = "cargo"
+args = ["build", "--profile", "${CARGO_PROFILE}", "${@}"]
+
+[tasks.install-rust-bins]
+description = "Install Rust binaries (vulhunt-ce, bias-tutil, bias-lutil)"
+linux_alias = "install-rust-bins-unix"
+mac_alias = "install-rust-bins-unix"
+windows_alias = "install-rust-bins-windows"
+
+[tasks.install-rust-bins-unix]
+private = true
+script = ['''
+INSTALL_ARGS=""
+if [ -n "${INSTALL_PREFIX}" ]; then
+  INSTALL_ARGS="--root ${INSTALL_PREFIX}"
+fi
+cargo install --force --path bias-vulhunt ${INSTALL_ARGS} ${@}
+cargo install --force --path bias-tutil ${INSTALL_ARGS} ${@}
+cargo install --force --path bias-lutil ${INSTALL_ARGS} ${@}
+''']
+
+[tasks.install-rust-bins-windows]
+private = true
+env = { "LUA_LIB_NAME" = "lua51" }
+script_runner = "cmd"
+script_runner_args = ["/c"]
+script_extension = "cmd"
+script = ['''
+@echo off
+set INSTALL_ARGS=
+if defined INSTALL_PREFIX set INSTALL_ARGS=--root %INSTALL_PREFIX%
+cargo install --force --path bias-vulhunt %INSTALL_ARGS% %*
+cargo install --force --path bias-tutil %INSTALL_ARGS% %*
+cargo install --force --path bias-lutil %INSTALL_ARGS% %*
+''']
+
+[tasks.install-sleighc]
+description = "Install sleighc binary"
+linux_alias = "install-sleighc-unix"
+mac_alias = "install-sleighc-unix"
+windows_alias = "install-sleighc-windows"
+
+[tasks.install-sleighc-unix]
+private = true
+script = ['''
+# Resolve install bin directory
+if [ -n "${INSTALL_PREFIX}" ]; then
+  BIN_DIR="${INSTALL_PREFIX}/bin"
+elif [ -n "${CARGO_INSTALL_ROOT}" ]; then
+  BIN_DIR="${CARGO_INSTALL_ROOT}/bin"
+elif [ -n "${CARGO_HOME}" ]; then
+  BIN_DIR="${CARGO_HOME}/bin"
+else
+  BIN_DIR="${HOME}/.cargo/bin"
+fi
+
+# find sleighc in build artefacts
+SLEIGHC=$(find target/${CARGO_OUT_DIR}/build -path "*/bias-core-*/out/build/decompiler/ghidra/sleighc" -type f 2>/dev/null | head -n 1)
+
+if [ -z "${SLEIGHC}" ]; then
+  echo "error: sleighc binary not found in build artefacts"
+  exit 1
+fi
+
+mkdir -p "${BIN_DIR}"
+cp "${SLEIGHC}" "${BIN_DIR}/sleighc"
+chmod +x "${BIN_DIR}/sleighc"
+''']
+
+[tasks.install-sleighc-windows]
+private = true
+script_runner = "cmd"
+script_runner_args = ["/c"]
+script_extension = "cmd"
+script = ['''
+@echo off
+setlocal enabledelayedexpansion
+
+REM resolve install bin directory
+if defined INSTALL_PREFIX (
+  set "BIN_DIR=%INSTALL_PREFIX%\bin"
+) else if defined CARGO_INSTALL_ROOT (
+  set "BIN_DIR=%CARGO_INSTALL_ROOT%\bin"
+) else if defined CARGO_HOME (
+  set "BIN_DIR=%CARGO_HOME%\bin"
+) else (
+  set "BIN_DIR=%USERPROFILE%\.cargo\bin"
+)
+
+REM find sleighc.exe in build artefacts
+set "SLEIGHC="
+for /r target\%CARGO_OUT_DIR%\build %%f in (sleighc.exe) do (
+  echo %%f | findstr /c:"bias-core" >nul && if exist "%%f" set "SLEIGHC=%%f"
+)
+
+if not defined SLEIGHC (
+  echo error: sleighc.exe not found in build artefacts
+  exit /b 1
+)
+
+if not exist "%BIN_DIR%" mkdir "%BIN_DIR%"
+copy /y "%SLEIGHC%" "%BIN_DIR%\sleighc.exe"
+''']
+
+[tasks.clean-cargo]
+description = "Clean cargo build artefacts"
+command = "cargo"
+args = ["clean"]
+
+[tasks.clean-luajit]
+description = "Remove LuaJIT build directory"
+ignore_errors = true
+linux_alias = "clean-luajit-unix"
+mac_alias = "clean-luajit-unix"
+windows_alias = "clean-luajit-windows"
+
+[tasks.clean-luajit-unix]
+private = true
+ignore_errors = true
+script = ['rm -rf target/luajit']
+
+[tasks.clean-luajit-windows]
+private = true
+ignore_errors = true
+script_runner = "cmd"
+script_runner_args = ["/c"]
+script_extension = "cmd"
+script = ['if exist target\\luajit rmdir /s /q target\\luajit']
+
+[tasks.clean-llvm]
+description = "Remove LLVM download directory"
+ignore_errors = true
+linux_alias = "clean-llvm-unix"
+mac_alias = "clean-llvm-unix"
+windows_alias = "clean-llvm-windows"
+
+[tasks.clean-llvm-unix]
+private = true
+ignore_errors = true
+script = ['rm -rf target/llvm']
+
+[tasks.clean-llvm-windows]
+private = true
+ignore_errors = true
+script_runner = "cmd"
+script_runner_args = ["/c"]
+script_extension = "cmd"
+script = ['if exist target\\llvm rmdir /s /q target\\llvm']
+
+[tasks.prepare-bundle]
+description = "Prepare distribution bundle"
+linux_alias = "prepare-bundle-unix"
+mac_alias = "prepare-bundle-unix"
+windows_alias = "prepare-bundle-windows"
+
+[tasks.prepare-bundle-unix]
+dependencies = ["build", "llvm-download"]
+script = ['''
+rm -rf target/bundle
+mkdir -p target/bundle/lib
+cp target/${CARGO_OUT_DIR}/vulhunt-ce target/bundle/
+cp target/${CARGO_OUT_DIR}/bias-tutil target/bundle/
+cp target/${CARGO_OUT_DIR}/bias-lutil target/bundle/
+SLEIGHC=$(find target/${CARGO_OUT_DIR}/build -path "*/bias-core-*/out/build/decompiler/ghidra/sleighc" -type f 2>/dev/null | head -n 1)
+if [ -z "${SLEIGHC}" ]; then
+  echo "error: sleighc binary not found in build artefacts"
+  exit 1
+fi
+cp "${SLEIGHC}" target/bundle/sleighc
+chmod +x target/bundle/sleighc
+if [ "$(uname)" = "Darwin" ]; then
+  cp target/llvm/lib/libclang.dylib target/bundle/lib/
+  PLATFORM="macos-$(uname -m)"
+else
+  cp "$(readlink -f target/llvm/lib/libclang.so)" target/bundle/lib/libclang.so
+  PLATFORM="linux-$(uname -m)"
+fi
+VERSION="${VULHUNT_VERSION:-$(grep -m1 '^version' bias-vulhunt/Cargo.toml | cut -d'"' -f2)}"
+ARCHIVE="target/vulhunt-ce-${VERSION}-${PLATFORM}.zip"
+rm -f "${ARCHIVE}"
+(cd target/bundle && zip -r "../vulhunt-ce-${VERSION}-${PLATFORM}.zip" .)
+echo "Bundle ready: ${ARCHIVE}"
+''']
+
+[tasks.prepare-bundle-windows]
+dependencies = ["build", "llvm-download"]
+script_runner = "cmd"
+script_runner_args = ["/c"]
+script_extension = "cmd"
+script = ['''
+@echo off
+if exist target\bundle rmdir /s /q target\bundle
+mkdir target\bundle\lib
+copy /y target\%CARGO_OUT_DIR%\vulhunt-ce.exe target\bundle\
+copy /y target\%CARGO_OUT_DIR%\bias-tutil.exe target\bundle\
+copy /y target\%CARGO_OUT_DIR%\bias-lutil.exe target\bundle\
+setlocal enabledelayedexpansion
+set "SLEIGHC="
+for /r target\%CARGO_OUT_DIR%\build %%f in (sleighc.exe) do (
+  echo %%f | findstr /c:"bias-core" >nul && if exist "%%f" set "SLEIGHC=%%f"
+)
+if not defined SLEIGHC (
+  echo error: sleighc.exe not found in build artefacts
+  exit /b 1
+)
+copy /y "%SLEIGHC%" target\bundle\sleighc.exe
+copy /y target\llvm\bin\libclang.dll target\bundle\lib\
+if defined VULHUNT_VERSION (
+  set "VERSION=%VULHUNT_VERSION%"
+) else (
+  for /f "tokens=2 delims==" %%v in ('findstr /r "^version" bias-vulhunt\Cargo.toml') do set "VERSION=%%~v"
+  set "VERSION=!VERSION: =!"
+)
+set "ARCHIVE=target\vulhunt-ce-%VERSION%-windows-x86_64.zip"
+if exist "%ARCHIVE%" del "%ARCHIVE%"
+7z a -tzip "%ARCHIVE%" .\target\bundle\*
+echo Bundle ready: %ARCHIVE%
+''']

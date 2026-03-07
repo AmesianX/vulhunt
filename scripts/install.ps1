@@ -1,0 +1,299 @@
+# VulHunt CE Installer for Windows
+# Usage: irm https://ps.vulhunt.sh | iex
+
+#Requires -Version 5.1
+
+$ErrorActionPreference = "Stop"
+
+$Repo = "vulhunt-re/vulhunt"
+$DataUrl = "https://github.com/vulhunt-re/data/archive/refs/heads/main.zip"
+$InstallDir = if ($env:VULHUNT_INSTALL_DIR) { $env:VULHUNT_INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA "vulhunt-ce" }
+$BinDir = if ($env:VULHUNT_BIN_DIR) { $env:VULHUNT_BIN_DIR } else { $InstallDir }
+$DataDir = Join-Path $env:LOCALAPPDATA "vulhunt\data"
+
+function Write-Info {
+    param([string]$Message)
+    Write-Host "info: " -ForegroundColor Blue -NoNewline
+    Write-Host $Message
+}
+
+function Write-Warn {
+    param([string]$Message)
+    Write-Host "warn: " -ForegroundColor Yellow -NoNewline
+    Write-Host $Message
+}
+
+function Write-Err {
+    param([string]$Message)
+    Write-Host "error: " -ForegroundColor Red -NoNewline
+    Write-Host $Message
+    Write-Host ""
+    Write-Host "Press any key to exit..." -ForegroundColor Gray
+    $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+    exit 1
+}
+
+function Write-Success {
+    param([string]$Message)
+    Write-Host "success: " -ForegroundColor Green -NoNewline
+    Write-Host $Message
+}
+
+function Get-Architecture {
+    $arch = $env:PROCESSOR_ARCHITECTURE
+    if ($arch -eq "AMD64") {
+        return "x86_64"
+    } elseif ($arch -eq "ARM64") {
+        return "x86_64" # no support for aarch64 yet
+    } else {
+        Write-Err "Unsupported architecture: $arch"
+    }
+}
+
+function Get-LatestRelease {
+    try {
+        $response = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest" -UseBasicParsing
+        return $response.tag_name
+    }
+    catch {
+        Write-Err "Failed to fetch latest release: $_"
+    }
+}
+
+function Get-DownloadUrl {
+    param(
+        [string]$Version,
+        [string]$Platform
+    )
+    $verStripped = $Version -replace '^v', ''  # Strip 'v' prefix if present
+    return "https://github.com/$Repo/releases/download/$Version/vulhunt-ce-$verStripped-$Platform.zip"
+}
+
+function Test-VisualCppRedistributable {
+    # Check for Visual C++ Redistributable in registry
+    $vcRuntimePaths = @(
+        "HKLM:\SOFTWARE\Classes\Installer\Dependencies\Microsoft.VC*.runtime-",
+        "HKLM:\SOFTWARE\Microsoft\VisualStudio\*\VC\Runtimes",
+        "HKLM:\SOFTWARE\Wow6432Node\Microsoft\VisualStudio\*\VC\Runtimes"
+    )
+
+    foreach ($path in $vcRuntimePaths) {
+        if (Test-Path $path) {
+            $runtimes = Get-Item -Path $path -ErrorAction SilentlyContinue
+            if ($runtimes) {
+                return $true
+            }
+        }
+    }
+
+    return $false
+}
+
+function Install-VisualCppRedistributable {
+    Write-Info "Checking for Visual C++ Redistributable..."
+
+    if (Test-VisualCppRedistributable) {
+        Write-Success "Visual C++ Redistributable is already installed"
+        return
+    }
+
+    Write-Warn "Visual C++ Redistributable not found. Installing..."
+
+    $tempDir = Join-Path $env:TEMP "vcredist-$(Get-Random)"
+    New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
+
+    try {
+        $vcRedistUrl = "https://aka.ms/vc14/vc_redist.x64.exe"
+        $vcRedistPath = Join-Path $tempDir "vc_redist.exe"
+
+        Write-Info "Downloading Visual C++ Redistributable..."
+        $ProgressPreference = 'SilentlyContinue'
+        Invoke-WebRequest -Uri $vcRedistUrl -OutFile $vcRedistPath -UseBasicParsing
+        $ProgressPreference = 'Continue'
+
+        Write-Info "Installing Visual C++ Redistributable..."
+        $process = Start-Process -FilePath $vcRedistPath -ArgumentList "/quiet", "/norestart" -Wait -PassThru
+
+        if ($process.ExitCode -eq 0) {
+            Write-Success "Visual C++ Redistributable installed successfully"
+        } else {
+            Write-Warn "Visual C++ Redistributable installation completed with exit code: $($process.ExitCode)"
+        }
+    }
+    catch {
+        Write-Warn "Failed to install Visual C++ Redistributable: $_. Continuing installation anyway..."
+    }
+    finally {
+        if (Test-Path $tempDir) {
+            Remove-Item -Path $tempDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Install-StaticData {
+    param([string]$TempDir)
+
+    Write-Info "Downloading auxiliary data..."
+    $dataZipPath = Join-Path $TempDir "data.zip"
+    $dataExtractPath = Join-Path $TempDir "data_extracted"
+
+    $ProgressPreference = 'SilentlyContinue'
+    Invoke-WebRequest -Uri $DataUrl -OutFile $dataZipPath -UseBasicParsing
+    $ProgressPreference = 'Continue'
+
+    Write-Info "Extracting auxiliary data to $DataDir..."
+    Expand-Archive -Path $dataZipPath -DestinationPath $dataExtractPath -Force
+
+    if (Test-Path $DataDir) {
+        Remove-Item -Path $DataDir -Recurse -Force
+    }
+
+    $parentDir = Split-Path -Parent $DataDir
+    if (-not (Test-Path $parentDir)) {
+        New-Item -ItemType Directory -Path $parentDir -Force | Out-Null
+    }
+
+    $extractedFolder = Get-ChildItem -Path $dataExtractPath -Directory | Select-Object -First 1
+    Move-Item -Path $extractedFolder.FullName -Destination $DataDir -Force
+}
+
+function Install-VulHuntCE {
+    Write-Info "Detecting system..."
+
+    $arch = Get-Architecture
+    $platform = "windows-$arch"
+
+    Write-Info "Detected platform: $platform"
+
+    Install-VisualCppRedistributable
+
+    Write-Info "Fetching latest release..."
+    $version = if ($env:VULHUNT_VERSION) { $env:VULHUNT_VERSION } else { Get-LatestRelease }
+
+    if (-not $version) {
+        Write-Err "Failed to determine latest version. Set VULHUNT_VERSION to install a specific version."
+    }
+
+    Write-Info "Installing VulHunt CE $version..."
+
+    $downloadUrl = Get-DownloadUrl -Version $version -Platform $platform
+    Write-Info "Downloading from: $downloadUrl"
+
+    $tempDir = Join-Path $env:TEMP "vulhunt-ce-install-$(Get-Random)"
+    $zipPath = Join-Path $tempDir "vulhunt-ce.zip"
+    $extractPath = Join-Path $tempDir "extracted"
+
+    try {
+        New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
+
+        $ProgressPreference = 'SilentlyContinue'
+        Invoke-WebRequest -Uri $downloadUrl -OutFile $zipPath -UseBasicParsing
+        $ProgressPreference = 'Continue'
+
+        Write-Info "Extracting..."
+
+        New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
+
+        Expand-Archive -Path $zipPath -DestinationPath $extractPath -Force
+
+        $binaries = @("vulhunt-ce.exe", "bias-lutil.exe", "bias-tutil.exe", "sleighc.exe")
+        foreach ($binary in $binaries) {
+            $sourcePath = Join-Path $extractPath $binary
+            if (Test-Path $sourcePath) {
+                $destPath = Join-Path $BinDir $binary
+                Move-Item -Path $sourcePath -Destination $destPath -Force
+            }
+        }
+
+        $libSourcePath = Join-Path $extractPath "lib"
+        $libDestPath = Join-Path $BinDir "lib"
+        if (Test-Path $libSourcePath) {
+            Move-Item -Path $libSourcePath -Destination $libDestPath -Force
+        }
+
+        Set-Content -Path (Join-Path $InstallDir "version") -Value $version
+
+        Install-StaticData -TempDir $tempDir
+
+        Write-Success "VulHunt CE $version installed to $BinDir"
+
+        $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+        if ($userPath -notlike "*$BinDir*") {
+            Write-Host ""
+            Write-Warn "VulHunt CE is not in your PATH."
+            Write-Host ""
+            Write-Host "To add it to your PATH, run the following command:" -ForegroundColor Cyan
+            Write-Host ""
+            Write-Host "  `$env:Path += `";$BinDir`"" -ForegroundColor White
+            Write-Host "  [Environment]::SetEnvironmentVariable('Path', `$env:Path + ';$BinDir', 'User')" -ForegroundColor White
+            Write-Host ""
+
+            $addToPath = Read-Host "Would you like to add VulHunt CE to your PATH now? [Y/n]"
+            if ($addToPath -eq "" -or $addToPath -ieq "y" -or $addToPath -ieq "yes") {
+                $newPath = $userPath + ";" + $BinDir
+                [Environment]::SetEnvironmentVariable("Path", $newPath, "User")
+                $env:Path = $env:Path + ";" + $BinDir
+                Write-Success "Added to PATH. You may need to restart your terminal."
+            }
+        }
+
+        $biasDataEnv = [Environment]::GetEnvironmentVariable("BIAS_DATA", "User")
+        if (-not $biasDataEnv) {
+            Write-Host ""
+            Write-Warn "BIAS_DATA environment variable is not set."
+            Write-Host ""
+            Write-Host "To set it, run the following command:" -ForegroundColor Cyan
+            Write-Host ""
+            Write-Host "  [Environment]::SetEnvironmentVariable('BIAS_DATA', '$DataDir', 'User')" -ForegroundColor White
+            Write-Host ""
+
+            $setBiasData = Read-Host "Would you like to set BIAS_DATA now? [Y/n]"
+            if ($setBiasData -eq "" -or $setBiasData -ieq "y" -or $setBiasData -ieq "yes") {
+                [Environment]::SetEnvironmentVariable("BIAS_DATA", $DataDir, "User")
+                $env:BIAS_DATA = $DataDir
+                Write-Success "BIAS_DATA set. You may need to restart your terminal."
+            }
+        }
+
+        Write-Info "Building type libraries..."
+        $biasTutil = Join-Path $BinDir "bias-tutil.exe"
+        $env:Path = "$BinDir;$env:Path"
+        $typeDirs = @(
+            (Join-Path $DataDir "platforms\posix\types"),
+            (Join-Path $DataDir "platforms\uefi\types")
+        )
+        foreach ($typeDir in $typeDirs) {
+            if (Test-Path $typeDir) {
+                Get-ChildItem -Path $typeDir -Filter "*.bin" -Recurse | ForEach-Object {
+                    $hFile = $_.FullName -replace '\.bin$', '.h'
+                    if (Test-Path $hFile) {
+                        & $biasTutil build $hFile
+                    }
+                }
+            }
+        }
+
+        Write-Info "Building processor specifications..."
+        $biasLutil = Join-Path $BinDir "bias-lutil.exe"
+        $env:Path = "$BinDir;$env:Path"
+        & $biasLutil --data (Join-Path $DataDir "processors")
+
+        Write-Host ""
+        Write-Success "Installation complete!"
+        Write-Host ""
+        Write-Info "Run 'vulhunt-ce --help' to get started"
+        Write-Host ""
+        Write-Host "Press any key to exit..." -ForegroundColor Gray
+        $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+    }
+    catch {
+        Write-Err "Installation failed: $_"
+    }
+    finally {
+        if (Test-Path $tempDir) {
+            Remove-Item -Path $tempDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+Install-VulHuntCE

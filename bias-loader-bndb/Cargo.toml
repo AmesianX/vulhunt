@@ -1,0 +1,35 @@
+[package]
+name = "bias-loader-bndb"
+version = "1.0.0"
+edition = "2024"
+authors = [
+  "Sam L. Thomas <sam@binarly.io>",
+  "Francesco Evangelista <francesco@binarly.io>",
+  "Yegor Vasilenko <yegor@binarly.io>",
+  "Fabio Pagani <fabio@binarly.io>",
+  "Fernando Mercês <fernando@binarly.io>",
+  "Anton Ivanov <anton@binarly.io>",
+  "Lukas Seidel <lukas@binarly.io>",
+  "Claudiu-Vlad Ursache <claudiuv@binarly.io>",
+  "Chris McMahon Stone <chris@binarly.io>",
+]
+description = "Binary Ninja database loader for BIAS"
+repository = "https://github.com/vulhunt-re/vulhunt"
+license = "GPL-3.0"
+readme = "../README.md"
+
+[dependencies]
+async-trait = "0.1"
+bias = { version = "1.0", path = "../bias" }
+bias-core = { version = "1.0", path = "../bias-core" }
+binaryninja = { git = "https://github.com/Vector35/binaryninja-api.git", branch = "stable_5.2" }
+binaryninjacore-sys = { git = "https://github.com/Vector35/binaryninja-api.git", branch = "stable_5.2" }
+smallvec = "1"
+thiserror = "1"
+uuid = { version = "1", features = ["v7"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
+
+[lints]
+workspace = true
